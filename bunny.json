@@ -1,7 +1,7 @@
 {
-  "id": "go-api-with-redis",
-  "name": "Go API with Redis",
-  "description": "Simple Go KV API backed by Redis, running on Magic Containers.",
+  "id": "blockli-cache-proxy",
+  "name": "Blockli Cache Proxy",
+  "description": "Go HTTP cache proxy backed by Redis. Used by the Blockli Mobile App Bunny Edge Script to cache WordPress REST API responses at the edge.",
   "icon": "code",
   "containers": [
     {
@@ -13,6 +13,14 @@
         {
           "key": "REDIS_URL",
           "value": "redis://localhost:6379"
+        },
+        {
+          "key": "CACHE_API_TOKEN",
+          "value": ""
+        },
+        {
+          "key": "PORT",
+          "value": "8080"
         }
       ],
       "volumes": [],

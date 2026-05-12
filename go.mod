@@ -1,4 +1,4 @@
-module github.com/jamie-at-bunny/mc-template-go-api-with-redis
+module github.com/blockli/cache-proxy
 
 go 1.25.3
 
