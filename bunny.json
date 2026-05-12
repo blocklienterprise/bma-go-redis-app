@@ -1,0 +1,42 @@
+{
+  "id": "go-api-with-redis",
+  "name": "Go API with Redis",
+  "description": "Simple Go KV API backed by Redis, running on Magic Containers.",
+  "icon": "code",
+  "containers": [
+    {
+      "name": "app",
+      "imageNamespace": "library",
+      "imageName": "golang",
+      "imageTag": "1.25-alpine",
+      "environmentVariables": [
+        {
+          "key": "REDIS_URL",
+          "value": "redis://localhost:6379"
+        }
+      ],
+      "volumes": [],
+      "endpoints": [
+        {
+          "displayName": "HTTP",
+          "type": "CDN",
+          "containerPort": 8080
+        }
+      ]
+    },
+    {
+      "name": "redis",
+      "imageNamespace": "library",
+      "imageName": "redis",
+      "imageTag": "7-alpine",
+      "environmentVariables": [],
+      "volumes": [
+        {
+          "mountPath": "/data",
+          "sizeMB": 256
+        }
+      ],
+      "endpoints": []
+    }
+  ]
+}
