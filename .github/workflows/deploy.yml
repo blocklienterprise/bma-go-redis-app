@@ -36,5 +36,5 @@ jobs:
         with:
           app_id: ${{ vars.APP_ID }}
           api_key: ${{ secrets.BUNNYNET_API_KEY }}
-          container: bma-redis-api
+          container: app
           image_tag: ${{ github.sha }}
