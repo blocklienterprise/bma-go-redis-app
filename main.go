@@ -76,7 +76,37 @@ func main() {
 	mux.HandleFunc("POST /cache/purge", auth(handlePurge))
 
 	log.Printf("Cache proxy listening on :%s", port)
-	log.Fatal(http.ListenAndServe(":"+port, mux))
+	log.Fatal(http.ListenAndServe(":"+port, corsMiddleware(mux)))
+}
+
+// ---------------------------------------------------------------------------
+// CORS middleware
+// ---------------------------------------------------------------------------
+
+// corsMiddleware adds permissive CORS headers so the Blockli Studio web app
+// (and any other browser client) can call the proxy directly.
+// Security is enforced by the X-Cache-Token auth layer, not by Origin restriction.
+func corsMiddleware(next http.Handler) http.Handler {
+	allowed := getEnv("CORS_ALLOWED_ORIGINS", "*")
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if allowed == "*" {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		} else if origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+		}
+		w.Header().Set("Access-Control-Allow-Methods", "GET, PUT, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Cache-Token")
+		w.Header().Set("Access-Control-Max-Age", "86400")
+
+		// Handle preflight
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // ---------------------------------------------------------------------------
