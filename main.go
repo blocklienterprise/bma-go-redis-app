@@ -28,6 +28,25 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// redisConnectWithRetry tries to ping Redis up to maxAttempts times,
+// waiting delay between each attempt. Exits the process on final failure.
+func redisConnectWithRetry(client *redis.Client, maxAttempts int, delay time.Duration) {
+	for i := 1; i <= maxAttempts; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		err := client.Ping(ctx).Err()
+		cancel()
+		if err == nil {
+			log.Printf("Redis connected (attempt %d/%d)", i, maxAttempts)
+			return
+		}
+		if i == maxAttempts {
+			log.Fatalf("Redis unavailable after %d attempts: %v", maxAttempts, err)
+		}
+		log.Printf("Redis not ready (attempt %d/%d): %v — retrying in %s", i, maxAttempts, err, delay)
+		time.Sleep(delay)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Globals
 // ---------------------------------------------------------------------------
@@ -62,12 +81,9 @@ func main() {
 
 	rdb = redis.NewClient(opts)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := rdb.Ping(ctx).Err(); err != nil {
-		log.Fatalf("Redis connection failed (%s): %v", redisURL, err)
-	}
-	log.Printf("Redis connected at %s", redisURL)
+	// Retry up to 20 times (30 s total) — Redis sidecar may not be ready immediately.
+	redisConnectWithRetry(rdb, 20, 1500*time.Millisecond)
+	log.Printf("Redis ready at %s", redisURL)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handleHealth)
