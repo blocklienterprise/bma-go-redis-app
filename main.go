@@ -144,23 +144,17 @@ func auth(next http.HandlerFunc) http.HandlerFunc {
 // ---------------------------------------------------------------------------
 
 // GET /health
-// Returns 200 {"status":"ok","redis":true} or 503 {"status":"degraded","redis":false}
+// Always returns 200 so the Docker/Bunny health check never kills the container
+// due to a transient Redis hiccup. Redis reachability is still reported in the
+// body for observability.
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 
 	redisOk := rdb.Ping(ctx).Err() == nil
-	code := http.StatusOK
-	status := "ok"
-	if !redisOk {
-		code = http.StatusServiceUnavailable
-		status = "degraded"
-	}
-
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"status": status,
+		"status": "ok",
 		"redis":  redisOk,
 	})
 }
