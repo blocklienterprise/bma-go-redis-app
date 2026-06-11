@@ -90,9 +90,6 @@ func main() {
 	mux.HandleFunc("GET /cache", auth(handleGet))
 	mux.HandleFunc("PUT /cache", auth(handleSet))
 	mux.HandleFunc("POST /cache/purge", auth(handlePurge))
-	// Public app config endpoint — fetched by the mobile app and cached by BunnyCDN.
-	// No auth required: the config is not sensitive and the CDN must pull without headers.
-	mux.HandleFunc("GET /apps/{appId}/app-config.json", handleGetAppConfig)
 
 	log.Printf("Cache proxy listening on :%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, corsMiddleware(mux)))
@@ -160,34 +157,6 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 		"status": "ok",
 		"redis":  redisOk,
 	})
-}
-
-// GET /apps/{appId}/app-config.json
-// Public endpoint — no auth. Reads blockli:appconfig:{appId} from Redis.
-// BunnyCDN pulls from this URL and caches the response at cache.blockli.app.
-func handleGetAppConfig(w http.ResponseWriter, r *http.Request) {
-	appId := r.PathValue("appId")
-	if appId == "" {
-		jsonError(w, "missing appId", http.StatusBadRequest)
-		return
-	}
-
-	key := "blockli:appconfig:" + appId
-	val, err := rdb.Get(r.Context(), key).Bytes()
-	if err == redis.Nil {
-		jsonError(w, "app config not found", http.StatusNotFound)
-		return
-	}
-	if err != nil {
-		log.Printf("Redis GET error for key %q: %v", key, err)
-		jsonError(w, "redis error", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "public, max-age=300")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(val)
 }
 
 // GET /cache?key={key}
