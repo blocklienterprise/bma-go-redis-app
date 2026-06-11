@@ -1,75 +1,203 @@
-# Go KV API with Redis for Magic Containers
+# Blockli Go Redis API
 
-A minimal Go key-value API backed by Redis, ready to deploy on [Bunny Magic Containers](https://bunny.net/magic-containers/).
+Go HTTP service that gives Blockli Studio and the Bunny Edge Script controlled access to Redis. It is the fourth runtime component in the Blockli mobile platform, alongside Studio Cloud, the WordPress plugin, and the Expo mobile shell.
 
-## What's included
+The service is designed for Bunny Magic Containers with a Redis sidecar, but it can run anywhere that provides a Redis connection URL.
 
-- `main.go` - HTTP server with `GET`, `PUT`, and `DELETE` endpoints for key-value storage
-- `Dockerfile` - Multi-stage build producing a tiny Alpine-based image
-- `docker-compose.yml` - Local development setup with Redis
-- `bunny.json` - Magic Containers app config with both `app` and `redis` containers
-- `.github/workflows/deploy.yml` - GitHub Actions workflow to build, push to GitHub Container Registry, and deploy to Magic Containers
+## Current Architecture
 
-## Run locally
+```text
+Blockli Studio
+  -> PUT /cache
+  -> stores published app config as blockli:appconfig:{appId}
 
-```bash
-docker compose up
+Expo Mobile App
+  -> cache.blockli.app
+  -> Bunny Edge Script
+       -> GET/PUT /cache for WordPress REST response caching
+       -> GET /apps/{appId}/app-config.json for published app config
+            -> Go API
+            -> Redis
+
+WordPress Plugin
+  -> Bunny Edge Script invalidation webhook
+  -> Edge Script calls POST /cache/purge
 ```
 
-```bash
-# Set a value
-curl -X PUT http://localhost:8080/kv/greeting -d '{"value": "Hello world"}'
-# {"key":"greeting","value":"Hello world"}
+The Go service does not authenticate WordPress users and does not proxy WordPress content itself. The Bunny Edge Script owns tenant routing, cache-key construction, origin requests, response shaping, and bearer-token cache scoping.
 
-# Get a value
-curl http://localhost:8080/kv/greeting
-# {"key":"greeting","value":"Hello world"}
+## Endpoints
 
-# Delete a value
-curl -X DELETE http://localhost:8080/kv/greeting
+### Health
+
+```text
+GET /health
 ```
 
-## Deploy to Magic Containers
+Returns HTTP 200 even when Redis is temporarily unavailable so the container is not restarted for a transient sidecar failure. Inspect the `redis` field:
 
-This template uses **multiple containers**: an `app` container for the Go API and a `redis` container for data storage. Magic Containers runs both containers together in the same app, and they communicate over an internal network.
-
-### 1. Fork and push
-
-Fork this repository and push to the `main` branch. The GitHub Actions workflow will automatically build the Docker image and push it to `ghcr.io/<your-username>/mc-template-go-api-with-redis` tagged with both `latest` and the commit SHA.
-
-### 2. Make the package public
-
-Go to your GitHub profile → **Packages** → select the `mc-template-go-api-with-redis` package → **Package settings** → change visibility to **Public**.
-
-### 3. Create an app on Magic Containers
-
-1. Log in to the [bunny.net dashboard](https://dash.bunny.net) and navigate to **Magic Containers**.
-2. Click **Create App**.
-3. Add the **app** container:
-   - **Registry**: GitHub Container Registry (`ghcr.io`)
-   - **Image**: `ghcr.io/<your-username>/mc-template-go-api-with-redis:latest`
-   - **Environment variable**: `REDIS_URL` = `redis://localhost:6379`
-   - Add an **Endpoint** on port `8080`
-4. Add the **redis** container:
-   - **Registry**: Docker Hub
-   - **Image**: `redis:7-alpine`
-   - Add a **Persistent Volume** mounted at `/data` (this keeps your data across restarts)
-5. Confirm and deploy.
-
-Containers within the same app share `localhost`. The `app` container connects to `redis://localhost:6379` using the `REDIS_URL` environment variable.
-
-### 4. Test it
-
-Once deployed, you'll get a `*.bunny.run` URL:
-
-```bash
-curl -X PUT https://mc-xxx.bunny.run/kv/greeting -d '{"value": "Hello from Magic Containers"}'
-curl https://mc-xxx.bunny.run/kv/greeting
+```json
+{
+  "status": "ok",
+  "redis": true
+}
 ```
 
-## Continuous deployment
+### Read Cache Value
 
-The workflow automatically deploys to Magic Containers on every push to `main`. Configure the following in your repository settings:
+```text
+GET /cache?key={redis-key}
+X-Cache-Token: {CACHE_API_TOKEN}
+```
 
-- **Variable** `APP_ID` - your Magic Containers app ID
-- **Secret** `BUNNYNET_API_KEY` - your bunny.net API key
+Returns the raw stored JSON or HTTP 404 when the key is missing.
+
+### Store Cache Value
+
+```text
+PUT /cache?key={redis-key}&ttl={seconds}
+X-Cache-Token: {CACHE_API_TOKEN}
+Content-Type: application/json
+```
+
+The request body is stored unchanged with the requested Redis TTL. The default TTL is 300 seconds and request bodies are capped at 10 MB. Success returns HTTP 204.
+
+### Purge Cache Keys
+
+```text
+POST /cache/purge
+X-Cache-Token: {CACHE_API_TOKEN}
+Content-Type: application/json
+
+{
+  "pattern": "blockli:prod:app-id:activity:*"
+}
+```
+
+The service uses Redis `SCAN` followed by `DEL`, avoiding the blocking `KEYS` command.
+
+### Public App Config
+
+```text
+GET /apps/{appId}/app-config.json
+```
+
+This endpoint is intentionally public because Bunny CDN and the mobile app must retrieve published app configuration without a cache token. It reads:
+
+```text
+blockli:appconfig:{appId}
+```
+
+The response is JSON with `Cache-Control: public, max-age=300`. Studio writes the underlying Redis value with a 30-day TTL each time an app configuration is published.
+
+## Authentication
+
+`GET /cache`, `PUT /cache`, and `POST /cache/purge` require `X-Cache-Token` when `CACHE_API_TOKEN` is configured.
+
+`GET /health` and `GET /apps/{appId}/app-config.json` are public.
+
+If `CACHE_API_TOKEN` is empty, protected endpoints accept unauthenticated requests. That behavior is for local development only and must not be used in production.
+
+## Redis Key Families
+
+Published app configuration:
+
+```text
+blockli:appconfig:{appId}
+```
+
+Edge-cached WordPress/provider responses:
+
+```text
+blockli:{environment}:{appId}:{routeType}:{routeHash}:{queryHash}:{authScope}:{appVersion}
+```
+
+The Bunny Edge Script creates response-cache keys. This service treats keys and values as opaque data.
+
+## Environment
+
+```text
+REDIS_URL            Redis URL, default redis://localhost:6379
+CACHE_API_TOKEN      shared secret for protected endpoints
+PORT                 HTTP port, default 8080
+CORS_ALLOWED_ORIGINS allowed browser origins, default *
+```
+
+## Local Development
+
+Run the Go service and Redis together:
+
+```bash
+docker compose up --build
+```
+
+The local stack uses:
+
+```text
+API:   http://localhost:8080
+Redis: redis://redis:6379
+Token: dev-secret
+```
+
+Smoke test:
+
+```bash
+curl http://localhost:8080/health
+
+curl -X PUT "http://localhost:8080/cache?key=test&ttl=60" \
+  -H "X-Cache-Token: dev-secret" \
+  -H "Content-Type: application/json" \
+  -d '{"hello":"world"}'
+
+curl "http://localhost:8080/cache?key=test" \
+  -H "X-Cache-Token: dev-secret"
+
+curl -X POST http://localhost:8080/cache/purge \
+  -H "X-Cache-Token: dev-secret" \
+  -H "Content-Type: application/json" \
+  -d '{"pattern":"test*"}'
+```
+
+Run directly against an existing Redis instance:
+
+```bash
+REDIS_URL=redis://localhost:6379 \
+CACHE_API_TOKEN=dev-secret \
+PORT=8080 \
+go run .
+```
+
+## Deployment
+
+The included Dockerfile builds a static Linux binary and exposes port `8080`. `bunny.json` defines the intended Magic Containers deployment with:
+
+- The Go application container.
+- A Redis 7 sidecar.
+- A persistent volume mounted at `/data`.
+- A public HTTP endpoint for the Go API.
+
+Pushes to `main` run `.github/workflows/deploy.yml`, which builds and publishes the container to GHCR and updates the configured Bunny Magic Containers application.
+
+Required GitHub repository configuration:
+
+```text
+Variable: APP_ID
+Secret:   BUNNYNET_API_KEY
+```
+
+Production must also configure `CACHE_API_TOKEN` in Magic Containers and store the same URL/token on the corresponding Studio app record.
+
+## Integration Boundaries
+
+- Studio calls the protected cache API when publishing app config and from manual purge controls.
+- The Bunny Edge Script looks up each app's `cache_api_url` and `cache_api_token` in the shared Studio database.
+- The Bunny Edge Script uses this service for cached WordPress/provider responses.
+- The Bunny Edge Script delegates `/apps/{appId}/app-config.json` to this service.
+- Expo normally accesses this service through `cache.blockli.app`, not through the Magic Container URL directly.
+
+## Current Limitations
+
+- There are no automated Go tests yet.
+- The API token is service-wide; per-app isolation is currently provided by Studio registry routing and key naming rather than independent API credentials enforced by this service.
+- The public app-config endpoint accepts any path-safe app ID and relies on possession of the app ID plus the public nature of mobile configuration.
+- Redis durability and regional replication depend on the selected Magic Containers/Redis deployment configuration.
