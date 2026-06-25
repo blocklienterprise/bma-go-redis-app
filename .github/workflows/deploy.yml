@@ -3,7 +3,7 @@ name: Build and Deploy to Magic Containers
 on:
   push:
     branches:
-      - main
+      - live-messaging
 
 jobs:
   build:
