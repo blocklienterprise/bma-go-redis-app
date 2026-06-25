@@ -93,6 +93,9 @@ func main() {
 	// Public app config endpoint — fetched by the mobile app and cached by BunnyCDN.
 	// No auth required: the config is not sensitive and the CDN must pull without headers.
 	mux.HandleFunc("GET /apps/{appId}/app-config.json", handleGetAppConfig)
+	// Phase 0 WebSocket spike — inert unless WS_ECHO_ENABLED=1. See ws_echo.go.
+	// Confirms Bunny passes the WS upgrade through to the container; delete once verified.
+	mux.HandleFunc("GET /ws/echo", handleWSEcho)
 
 	log.Printf("Cache proxy listening on :%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, corsMiddleware(mux)))

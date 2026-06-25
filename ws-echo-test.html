@@ -1,0 +1,123 @@
+<!doctype html>
+<!--
+  Phase 0 WebSocket spike — test client.
+
+  Open this file directly in a browser (no server needed) and point it at the
+  Magic Container's /ws/echo endpoint to confirm Bunny passes the WS upgrade.
+
+  Prereqs:
+    1. Deploy the container with WS_ECHO_ENABLED=1.
+    2. In the Bunny dashboard: Pull Zone -> General -> WebSockets -> ON.
+    3. Use the wss:// URL of the CDN endpoint, e.g. wss://cache.blockli.app/ws/echo
+
+  Success = green "OPEN", the "connected: ..." greeting, and echoed messages
+  with a sane round-trip time. If it stays "CONNECTING" then closes, the edge is
+  not passing the upgrade (check the WebSockets toggle / endpoint).
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bunny WS Echo Spike</title>
+  <style>
+    body { font: 14px/1.5 -apple-system, system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
+    h1 { font-size: 1.2rem; }
+    input, button { font: inherit; padding: .5rem .6rem; }
+    input[type=text] { width: 100%; box-sizing: border-box; }
+    .row { display: flex; gap: .5rem; margin: .5rem 0; }
+    .row > input { flex: 1; }
+    #status { font-weight: 600; }
+    #log { background: #111; color: #c8e6c9; padding: .75rem; border-radius: 6px;
+           height: 300px; overflow: auto; white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 12px; }
+    .muted { color: #888; }
+    .err { color: #ff8a80; }
+    .tx { color: #82b1ff; }
+    .rx { color: #b9f6ca; }
+  </style>
+</head>
+<body>
+  <h1>Bunny Magic Containers — WebSocket upgrade spike</h1>
+  <p class="muted">Confirms the edge passes a real WS upgrade through to the Go container.</p>
+
+  <div class="row">
+    <input id="url" type="text" value="wss://cache.blockli.app/ws/echo" />
+    <button id="connect">Connect</button>
+    <button id="disconnect" disabled>Disconnect</button>
+  </div>
+  <p>Status: <span id="status" class="muted">idle</span></p>
+
+  <div class="row">
+    <input id="msg" type="text" placeholder="type a message and press Send" value="hello bunny" />
+    <button id="send" disabled>Send</button>
+    <button id="ping" disabled>Latency test ×10</button>
+  </div>
+
+  <div id="log"></div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const logEl = $("log");
+    let ws = null;
+    let sentAt = 0;
+    let pingsLeft = 0;
+    const rtts = [];
+
+    function log(msg, cls) {
+      const line = document.createElement("div");
+      if (cls) line.className = cls;
+      line.textContent = new Date().toLocaleTimeString() + "  " + msg;
+      logEl.appendChild(line);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+    function setStatus(text, color) {
+      $("status").textContent = text;
+      $("status").style.color = color || "#888";
+    }
+    function setConnected(on) {
+      $("connect").disabled = on;
+      $("disconnect").disabled = !on;
+      $("send").disabled = !on;
+      $("ping").disabled = !on;
+    }
+
+    $("connect").onclick = () => {
+      const url = $("url").value.trim();
+      log("connecting to " + url + " ...", "muted");
+      setStatus("CONNECTING", "#ffb74d");
+      try { ws = new WebSocket(url); } catch (e) { log("construct failed: " + e, "err"); return; }
+
+      ws.onopen = () => { setStatus("OPEN", "#69f0ae"); setConnected(true); log("OPEN — upgrade succeeded", "rx"); };
+      ws.onmessage = (ev) => {
+        if (pingsLeft > 0 && sentAt) {
+          const rtt = performance.now() - sentAt;
+          rtts.push(rtt);
+          log("rx (rtt " + rtt.toFixed(1) + " ms): " + ev.data, "rx");
+          sentAt = 0; pingsLeft--;
+          if (pingsLeft > 0) doPing();
+          else {
+            const avg = rtts.reduce((a, b) => a + b, 0) / rtts.length;
+            const min = Math.min(...rtts), max = Math.max(...rtts);
+            log(`latency: avg ${avg.toFixed(1)} ms  min ${min.toFixed(1)}  max ${max.toFixed(1)} (n=${rtts.length})`, "tx");
+          }
+        } else {
+          log("rx: " + ev.data, "rx");
+        }
+      };
+      ws.onerror = () => log("error event (see console / network tab)", "err");
+      ws.onclose = (ev) => {
+        setStatus("CLOSED (code " + ev.code + ")", "#ff8a80");
+        setConnected(false);
+        log("CLOSED code=" + ev.code + " reason=" + (ev.reason || "(none)") + " clean=" + ev.wasClean, "err");
+      };
+    };
+
+    $("disconnect").onclick = () => ws && ws.close();
+    $("send").onclick = () => {
+      const m = $("msg").value;
+      ws.send(m); log("tx: " + m, "tx");
+    };
+    function doPing() { sentAt = performance.now(); ws.send("ping-" + Date.now()); }
+    $("ping").onclick = () => { rtts.length = 0; pingsLeft = 10; log("running latency test ×10 ...", "muted"); doPing(); };
+  </script>
+</body>
+</html>
