@@ -1,39 +1,40 @@
-// Redis pub/sub bridge — the cross-pod bus. Each pod subscribes to all thread
-// channels and hands incoming events to its local hub; publishing a message or
-// typing event PUBLISHes to the thread's channel so every pod's subscribers
-// receive it.
+// Redis pub/sub bridge — the cross-pod bus. Each pod subscribes to all realtime
+// channel namespaces and hands incoming events to its local hub; publishing an
+// event PUBLISHes to a channel so every pod's subscribers receive it.
 package main
 
 import (
 	"context"
 	"fmt"
 	"log"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 )
+
+// channelPatterns are the pub/sub namespaces this service fans out. PSUBSCRIBE on
+// an explicit set (rather than "*") so unrelated keyspace traffic is ignored.
+var channelPatterns = []string{
+	"thread:*",
+	"user:*",
+	"activity:*",
+	"group:*",
+	"forum:*",
+	"presence",
+}
 
 type realtime struct {
 	rdb *redis.Client
 	hub *Hub
 }
 
-// run keeps a PSUBSCRIBE on thread:* alive, delivering events to local clients.
-// PSUBSCRIBE thread:* is simple and correct at our scale (every pod sees every
-// thread's traffic). If a pod ever carries enough threads that this is wasteful,
-// switch to dynamic per-thread SUBSCRIBE keyed on the hub's active threads.
+// run keeps the PSUBSCRIBE alive, delivering events to local clients by channel.
 func (rt *realtime) run(ctx context.Context) {
 	for ctx.Err() == nil {
-		pubsub := rt.rdb.PSubscribe(ctx, "thread:*")
-		log.Printf("realtime: subscribed to thread:*")
+		pubsub := rt.rdb.PSubscribe(ctx, channelPatterns...)
+		log.Printf("realtime: subscribed to %v", channelPatterns)
 		for msg := range pubsub.Channel() {
-			id, err := threadIDFromChannel(msg.Channel)
-			if err != nil {
-				continue
-			}
-			rt.hub.deliver(id, []byte(msg.Payload))
+			rt.hub.deliver(msg.Channel, []byte(msg.Payload))
 		}
 		_ = pubsub.Close()
 		if ctx.Err() == nil {
@@ -43,8 +44,8 @@ func (rt *realtime) run(ctx context.Context) {
 	}
 }
 
-func (rt *realtime) publish(ctx context.Context, threadID int, payload []byte) error {
-	return rt.rdb.Publish(ctx, fmt.Sprintf("thread:%d", threadID), payload).Err()
+func (rt *realtime) publish(ctx context.Context, channel string, payload []byte) error {
+	return rt.rdb.Publish(ctx, channel, payload).Err()
 }
 
 // setTyping records ephemeral typing state with a short TTL so a lost "stop"
@@ -56,12 +57,4 @@ func (rt *realtime) setTyping(ctx context.Context, threadID, uid int, typing boo
 		return rt.rdb.Del(ctx, key).Err()
 	}
 	return rt.rdb.Set(ctx, key, "1", 6*time.Second).Err()
-}
-
-func threadIDFromChannel(channel string) (int, error) {
-	_, rest, ok := strings.Cut(channel, ":")
-	if !ok {
-		return 0, fmt.Errorf("malformed channel %q", channel)
-	}
-	return strconv.Atoi(rest)
 }

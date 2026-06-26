@@ -32,6 +32,7 @@ type server struct {
 // event is the envelope shared across WS frames and Redis payloads.
 type event struct {
 	Type     string          `json:"type"`
+	Channel  string          `json:"channel,omitempty"`
 	ThreadID int             `json:"thread_id,omitempty"`
 	UserID   int             `json:"user_id,omitempty"`
 	Data     json.RawMessage `json:"data,omitempty"`
@@ -60,7 +61,7 @@ func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
 		uid:   claims.UID,
 		token: token,
 		send:  make(chan []byte, 64),
-		subs:  make(map[int]struct{}),
+		subs:  make(map[string]struct{}),
 	}
 	defer s.hub.remove(c)
 
@@ -85,10 +86,11 @@ func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleClientMessage(ctx context.Context, c *client, data []byte) {
 	var in struct {
-		Type      string `json:"type"`
-		ThreadIDs []int  `json:"thread_ids"`
-		ThreadID  int    `json:"thread_id"`
-		Typing    bool   `json:"typing"`
+		Type      string   `json:"type"`
+		Channels  []string `json:"channels"`
+		ThreadIDs []int    `json:"thread_ids"` // back-compat → thread:{id}
+		ThreadID  int      `json:"thread_id"`
+		Typing    bool     `json:"typing"`
 	}
 	if json.Unmarshal(data, &in) != nil {
 		return
@@ -96,51 +98,81 @@ func (s *server) handleClientMessage(ctx context.Context, c *client, data []byte
 
 	switch in.Type {
 	case "subscribe":
-		accepted := []int{}
-		denied := []int{}
+		channels := append([]string{}, in.Channels...)
 		for _, t := range in.ThreadIDs {
-			if s.authorize(ctx, c, t) {
-				s.hub.subscribe(c, t)
-				accepted = append(accepted, t)
+			channels = append(channels, fmt.Sprintf("thread:%d", t))
+		}
+		accepted := []string{}
+		denied := []string{}
+		for _, ch := range channels {
+			if s.authorize(ctx, c, ch) {
+				s.hub.subscribe(c, ch)
+				accepted = append(accepted, ch)
 			} else {
-				denied = append(denied, t)
+				denied = append(denied, ch)
 			}
 		}
-		// Ack so the client can show which threads it's actually subscribed to
-		// (a non-empty "denied" means thread authorization failed — usually a
+		// Ack so the client can see which channels it's actually subscribed to.
+		// A non-empty "denied" means channel authorization failed (usually a
 		// missing/unreachable WP_BASE_URL on the server).
-		ack, _ := json.Marshal(map[string][]int{"accepted": accepted, "denied": denied})
+		ack, _ := json.Marshal(map[string][]string{"accepted": accepted, "denied": denied})
 		c.enqueue(mustJSON(event{Type: "subscribed", Data: ack, TS: time.Now().Unix()}))
 		log.Printf("ws: uid=%d subscribe accepted=%v denied=%v", c.uid, accepted, denied)
 	case "typing":
 		// Only participants of a subscribed thread may emit typing.
-		if !c.subscribed(in.ThreadID) {
+		channel := fmt.Sprintf("thread:%d", in.ThreadID)
+		if !c.subscribed(channel) {
 			return
 		}
 		_ = s.rt.setTyping(ctx, in.ThreadID, c.uid, in.Typing)
 		payload, _ := json.Marshal(map[string]bool{"typing": in.Typing})
-		ev := mustJSON(event{Type: "typing", ThreadID: in.ThreadID, UserID: c.uid, Data: payload, TS: time.Now().Unix()})
-		_ = s.rt.publish(ctx, in.ThreadID, ev)
+		ev := mustJSON(event{Type: "typing", Channel: channel, ThreadID: in.ThreadID, UserID: c.uid, Data: payload, TS: time.Now().Unix()})
+		_ = s.rt.publish(ctx, channel, ev)
 	case "ping":
 		c.enqueue(mustJSON(event{Type: "pong", TS: time.Now().Unix()}))
 	}
 }
 
-// authorize confirms the user participates in threadID. BuddyBoss only returns a
-// thread to its participants, so a 200 from messages/{id} (with the user's own
-// bearer) proves membership. Cached in Redis to avoid a WP call per subscribe.
-func (s *server) authorize(ctx context.Context, c *client, threadID int) bool {
+// authorize decides whether a client may subscribe to a channel, dispatching by
+// namespace prefix:
+//   user:{id}                 → self only (no WP call)
+//   activity:global, presence → any authenticated user
+//   thread:{id}               → BuddyBoss messages/{id} (participant)
+//   group:{id}                → BuddyBoss groups/{id} (member/visible)
+//   forum:{id}                → BuddyBoss topics/{id} (readable)
+// The BuddyBoss checks are cached in Redis to avoid a WP call per subscribe.
+func (s *server) authorize(ctx context.Context, c *client, channel string) bool {
 	if s.skipAuthz {
 		return true
 	}
-	cacheKey := fmt.Sprintf("member:%d:%d", threadID, c.uid)
+	switch {
+	case channel == "activity:global" || channel == "presence":
+		return true
+	case strings.HasPrefix(channel, "user:"):
+		return channel == fmt.Sprintf("user:%d", c.uid)
+	case strings.HasPrefix(channel, "thread:"):
+		return s.authorizeViaBuddyBoss(ctx, c, channel, "messages/"+strings.TrimPrefix(channel, "thread:"))
+	case strings.HasPrefix(channel, "group:"):
+		return s.authorizeViaBuddyBoss(ctx, c, channel, "groups/"+strings.TrimPrefix(channel, "group:"))
+	case strings.HasPrefix(channel, "forum:"):
+		return s.authorizeViaBuddyBoss(ctx, c, channel, "topics/"+strings.TrimPrefix(channel, "forum:"))
+	default:
+		return false
+	}
+}
+
+// authorizeViaBuddyBoss returns true when a GET to {WP}/wp-json/buddyboss/v1/{path}
+// with the user's own bearer returns 200 (BuddyBoss only returns a resource the
+// user may access). Cached per channel+user.
+func (s *server) authorizeViaBuddyBoss(ctx context.Context, c *client, channel, path string) bool {
+	cacheKey := fmt.Sprintf("member:%s:%d", channel, c.uid)
 	if v, _ := s.rt.rdb.Get(ctx, cacheKey).Result(); v == "1" {
 		return true
 	}
 	if s.wpBaseURL == "" {
 		return false
 	}
-	url := fmt.Sprintf("%s/wp-json/buddyboss/v1/messages/%d", strings.TrimRight(s.wpBaseURL, "/"), threadID)
+	url := fmt.Sprintf("%s/wp-json/buddyboss/v1/%s", strings.TrimRight(s.wpBaseURL, "/"), path)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return false
