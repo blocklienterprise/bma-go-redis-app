@@ -230,8 +230,13 @@ Three components must agree on the same secrets and URLs:
   `BMA_REALTIME_INTERNAL_TOKEN`.)
 
 **Mobile config (`blockli-mobile/v1/config` → `endpoints.realtime`):**
-- Add `endpoints.realtime` = `wss://<realtime-host>/ws`. The tester falls back to
-  `wss://redis.blockli.app/ws` if absent.
+- Auto-derived per tenant from the WP option `bma_realtime_url` via
+  `BMA_Realtime::ws_url()` (https→wss + `/ws`). Set the URL once in the plugin
+  settings; the config endpoint emits `endpoints.realtime` for that tenant.
+- The app is a single multi-tenant binary, so this value is **never** hardcoded
+  in the client — when `endpoints.realtime` is empty, the socket simply doesn't
+  connect (REST messaging still works; live delivery/typing are off for that
+  tenant until the URL is set).
 
 RN client lives in the Expo app: `realtime.js` (connection + typing debounce) and
 `Messaging.js` (modal screen), opened from the header "Messages" button.
