@@ -35,6 +35,13 @@ services:
       REDIS_URL:       redis://redis:6379
       CACHE_API_TOKEN: dev-secret
       PORT:            "8080"
+      # Realtime messaging (see REALTIME.md). For local testing only —
+      # REALTIME_SKIP_AUTHZ bypasses the BuddyBoss membership check so you don't
+      # need a running WordPress. Never set it in production.
+      BMA_TOKEN_SECRET:       "${BMA_TOKEN_SECRET:-dev-token-secret}"
+      INTERNAL_PUBLISH_TOKEN: "${INTERNAL_PUBLISH_TOKEN:-dev-internal-token}"
+      WP_BASE_URL:            "${WP_BASE_URL:-}"
+      REALTIME_SKIP_AUTHZ:    "${REALTIME_SKIP_AUTHZ:-1}"
     depends_on:
       redis:
         condition: service_healthy

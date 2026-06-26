@@ -85,6 +85,34 @@ func main() {
 	redisConnectWithRetry(rdb, 20, 1500*time.Millisecond)
 	log.Printf("Redis ready at %s", redisURL)
 
+	// ── Realtime messaging layer ────────────────────────────────────────────
+	// Pub/sub bus for live message delivery, typing, and presence. Defaults to
+	// the cache sidecar (fine for a single-pod deployment); point at a shared
+	// Redis via REALTIME_REDIS_URL when running multiple pods so fan-out crosses
+	// pods. See REALTIME.md.
+	rtRedisURL := getEnv("REALTIME_REDIS_URL", redisURL)
+	rtOpts, err := redis.ParseURL(rtRedisURL)
+	if err != nil {
+		log.Fatalf("Invalid REALTIME_REDIS_URL %q: %v", rtRedisURL, err)
+	}
+	rtRdb := redis.NewClient(rtOpts)
+	hub := newHub()
+	rt := &realtime{rdb: rtRdb, hub: hub}
+	go rt.run(context.Background())
+
+	srv := &server{
+		hub:           hub,
+		rt:            rt,
+		tokenSecret:   getEnv("BMA_TOKEN_SECRET", ""),
+		internalToken: getEnv("INTERNAL_PUBLISH_TOKEN", ""),
+		wpBaseURL:     getEnv("WP_BASE_URL", ""),
+		skipAuthz:     getEnv("REALTIME_SKIP_AUTHZ", "") == "1",
+		httpClient:    &http.Client{Timeout: 5 * time.Second},
+	}
+	if srv.tokenSecret == "" {
+		log.Println("WARNING: BMA_TOKEN_SECRET is not set — all /ws connections will be rejected.")
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handleHealth)
 	mux.HandleFunc("GET /cache", auth(handleGet))
@@ -96,6 +124,10 @@ func main() {
 	// Phase 0 WebSocket spike — inert unless WS_ECHO_ENABLED=1. See ws_echo.go.
 	// Confirms Bunny passes the WS upgrade through to the container; delete once verified.
 	mux.HandleFunc("GET /ws/echo", handleWSEcho)
+
+	// Realtime messaging endpoints.
+	mux.HandleFunc("GET /ws", srv.handleWS)
+	mux.HandleFunc("POST /internal/publish", srv.handleInternalPublish)
 
 	log.Printf("Cache proxy listening on :%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, corsMiddleware(mux)))

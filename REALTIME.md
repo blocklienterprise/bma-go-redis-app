@@ -45,9 +45,16 @@ deploy proves the upgrade passes through *our* zone. The `/ws/echo` spike
    (defaulting to the sidecar `REDIS_URL`), so moving to a **shared Redis** when
    we add replicas is a config change, not a rewrite. The cache sidecar usage is
    untouched.
-4. **Auth:** Go validates the app's Bearer token against WordPress
-   (`GET /wp-json/buddyboss/v1/members/me`) once per connection, caching
-   `token → userID` in Redis (`EX 300`).
+4. **Auth (revised after reading the plugin):** the app's Bearer is a
+   self-contained HMAC-SHA256 token (`bma.<payload>.<sig>`, issued by
+   `BMA_Token_Auth`). Go validates **identity locally** with the shared
+   `bma_token_secret` (env `BMA_TOKEN_SECRET`) — no WP round-trip per connection,
+   and sockets keep authenticating even if WordPress is down. **Authorization**
+   (which threads a user may subscribe to) is not in the token, so Go calls
+   BuddyBoss `GET /messages/{id}` with the user's own bearer once per
+   thread-subscribe and caches the result (`member:{thread}:{uid}` EX 300).
+   _Supersedes the earlier "Go calls WP to validate identity" choice, which was
+   made before the token format was known._
 5. **Source of truth:** BuddyBoss REST for persistence (send / history /
    mark-read). A WP hook (`bp_messages_message_after_save`) calls Go
    `POST /internal/publish` to fan messages out live — so messages sent from the
@@ -118,15 +125,16 @@ message published on pod A never reaches a subscriber on pod B.
 
 ## Flows
 
-### Connect & auth (Go calls WP to validate)
+### Connect & auth (local token validation)
 1. Client opens `wss://rt.blockli.app/ws` with `Authorization: Bearer {token}`
-   on the handshake (RN `WebSocket` supports a headers option — keeps the token
-   out of the URL/logs).
-2. Go checks `authcache:{tokenHash}`; on miss, calls WP `members/me`, then caches
-   `token → userID` (`EX 300`).
-3. Client sends `{type:"subscribe", thread_ids:[…]}`. Go verifies thread
-   membership (participant set cached per thread) before subscribing the conn to
-   `thread:{id}`.
+   (RN `WebSocket` supports a headers option). Browsers can't set headers on a
+   WebSocket, so `/ws?token=…` is also accepted for the test page.
+2. Go verifies the HMAC signature + expiry with `BMA_TOKEN_SECRET` and extracts
+   `uid` — entirely local, no WP call (`auth.go`).
+3. Client sends `{type:"subscribe", thread_ids:[…]}`. Go authorizes each thread
+   via BuddyBoss `GET /messages/{id}` (cached `member:{thread}:{uid}` EX 300),
+   then subscribes the conn to `thread:{id}`. `REALTIME_SKIP_AUTHZ=1` bypasses
+   the check for local testing.
 
 ### New message (BuddyBoss authoritative)
 1. Client `POST`s to BuddyBoss `/messages` (existing path) and gets the saved
@@ -160,24 +168,26 @@ message published on pod A never reaches a subscriber on pod B.
 
 ## Build phases
 
-| Phase | Scope | Gate / outcome |
+| Phase | Scope | Status |
 |---|---|---|
-| **0 — Spike** ← *current* | `/ws/echo` + browser test client | Does Bunny pass the WS upgrade through our zone? |
-| 1 | `REALTIME_REDIS_URL`, WS auth (WP validate + cache), hub, subscribe, `message.new` fan-out via WP hook | Live message delivery |
-| 2 | **Typing indicators** (client debounce + Redis TTL + fan-out) | Headline feature |
-| 3 | Presence / last-seen + read receipts | |
-| 4 | Reconnect/backoff, background→push handoff, REST catch-up | Robustness |
+| **0 — Spike** | `/ws/echo` + browser test client | ✅ Bunny passes WS upgrade (confirmed on `wss://redis.blockli.app/ws/echo`). |
+| **1 — Realtime core** | `REALTIME_REDIS_URL`, local token auth, hub, subscribe + authz, `/ws`, `/internal/publish`, pub/sub fan-out | ✅ **Built + tested** end-to-end. Go: unit + cross-impl + 2-client integration. WP: `BMA_Realtime` hooks `messages_message_after_save` → `/internal/publish`. RN: `realtime.js` client (9/9 logic tests) + `Messaging.js` screen wired into `App.js`. |
+| **2 — Typing** | client debounce + Redis TTL + fan-out | ✅ **Built + tested.** Server `typing` event + `typing:{thread}:{user}` EX 6; RN `createTypingEmitter` debounce + "X is typing…" UI with self-healing TTL. |
+| 3 | Presence / last-seen + read receipts | ⬜ |
+| 4 | Reconnect/backoff, background→push handoff, REST catch-up | ⬜ |
 
-### Production realtime stack (Phase 1+)
-- WebSocket lib: **`github.com/coder/websocket`** (minimal, modern, no transitive
-  deps). The Phase 0 `ws_echo.go` hand-rolls the protocol to avoid a dependency
-  for the throwaway spike — **do not** model production code on it; delete it
-  once the edge is confirmed.
-- New files: `ws.go` (handshake + read/write loops), `hub.go` (connection
-  registry), `realtime.go` (Redis pub/sub bridge), `publish.go`
-  (`/internal/publish` webhook + `X-Internal-Token`).
-- New env: `REALTIME_REDIS_URL`, `WP_BASE_URL` (for token validation),
-  `INTERNAL_PUBLISH_TOKEN`.
+### Production realtime stack (built)
+- WebSocket lib: **`github.com/coder/websocket`** v1.8.15 (minimal, no transitive
+  deps). The Phase 0 `ws_echo.go` hand-rolls the protocol for the throwaway spike
+  only — **not** a model for production; delete it once you're satisfied.
+- Files: `auth.go` (local HMAC token validation), `hub.go` (connection registry +
+  fan-out), `realtime.go` (Redis pub/sub bridge + typing), `ws.go` (`/ws`
+  handshake, read/write loops, subscribe authz), `publish.go` (`/internal/publish`
+  webhook + `X-Internal-Token`).
+- Env: `BMA_TOKEN_SECRET` (required — WP `bma_token_secret`),
+  `REALTIME_REDIS_URL` (defaults to `REDIS_URL`), `INTERNAL_PUBLISH_TOKEN`,
+  `WP_BASE_URL` (for subscribe authz), `REALTIME_SKIP_AUTHZ=1` (testing only).
+- Tests: `auth_test.go` (`go test`), plus the integration flow documented below.
 
 ---
 
@@ -196,3 +206,32 @@ point the test page at `ws://localhost:8080/ws/echo`.
 
 Remove `ws_echo.go`, its route in `main.go`, and `ws-echo-test.html` once the
 edge path is confirmed and Phase 1 begins.
+
+---
+
+## Deployment / config checklist (Phase 1+)
+
+Three components must agree on the same secrets and URLs:
+
+**Go service (this container, env):**
+- `BMA_TOKEN_SECRET` = WordPress option `bma_token_secret` (so Go validates the
+  same tokens WP issues).
+- `INTERNAL_PUBLISH_TOKEN` = a shared secret for `/internal/publish`.
+- `WP_BASE_URL` = the site root (e.g. `https://blockli.dev`) — needed for
+  subscribe authorization. Without it, all subscribes are denied (unless
+  `REALTIME_SKIP_AUTHZ=1`, testing only).
+- `REALTIME_REDIS_URL` = shared Redis when running >1 pod (defaults to the
+  sidecar).
+
+**WordPress (`blockli-mobile-app`, `BMA_Realtime`):**
+- Option `bma_realtime_url` = the Go service base (e.g. `https://redis.blockli.app`).
+- Option `bma_realtime_internal_token` = same value as `INTERNAL_PUBLISH_TOKEN`.
+- (Both can be overridden by constants `BMA_REALTIME_URL` /
+  `BMA_REALTIME_INTERNAL_TOKEN`.)
+
+**Mobile config (`blockli-mobile/v1/config` → `endpoints.realtime`):**
+- Add `endpoints.realtime` = `wss://<realtime-host>/ws`. The tester falls back to
+  `wss://redis.blockli.app/ws` if absent.
+
+RN client lives in the Expo app: `realtime.js` (connection + typing debounce) and
+`Messaging.js` (modal screen), opened from the header "Messages" button.

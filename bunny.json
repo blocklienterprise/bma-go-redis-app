@@ -21,6 +21,22 @@
         {
           "key": "PORT",
           "value": "8080"
+        },
+        {
+          "key": "BMA_TOKEN_SECRET",
+          "value": ""
+        },
+        {
+          "key": "INTERNAL_PUBLISH_TOKEN",
+          "value": ""
+        },
+        {
+          "key": "WP_BASE_URL",
+          "value": ""
+        },
+        {
+          "key": "REALTIME_REDIS_URL",
+          "value": ""
         }
       ],
       "volumes": [],
