@@ -96,11 +96,22 @@ func (s *server) handleClientMessage(ctx context.Context, c *client, data []byte
 
 	switch in.Type {
 	case "subscribe":
+		accepted := []int{}
+		denied := []int{}
 		for _, t := range in.ThreadIDs {
 			if s.authorize(ctx, c, t) {
 				s.hub.subscribe(c, t)
+				accepted = append(accepted, t)
+			} else {
+				denied = append(denied, t)
 			}
 		}
+		// Ack so the client can show which threads it's actually subscribed to
+		// (a non-empty "denied" means thread authorization failed — usually a
+		// missing/unreachable WP_BASE_URL on the server).
+		ack, _ := json.Marshal(map[string][]int{"accepted": accepted, "denied": denied})
+		c.enqueue(mustJSON(event{Type: "subscribed", Data: ack, TS: time.Now().Unix()}))
+		log.Printf("ws: uid=%d subscribe accepted=%v denied=%v", c.uid, accepted, denied)
 	case "typing":
 		// Only participants of a subscribed thread may emit typing.
 		if !c.subscribed(in.ThreadID) {
@@ -135,6 +146,9 @@ func (s *server) authorize(ctx context.Context, c *client, threadID int) bool {
 		return false
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
+	// Bypass ngrok's browser-warning interstitial when WP_BASE_URL is an ngrok
+	// tunnel (dev). Harmless on real hosts.
+	req.Header.Set("ngrok-skip-browser-warning", "true")
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return false
