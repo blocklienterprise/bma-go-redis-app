@@ -75,6 +75,10 @@ Fixed behavior:
 - `activity.deleted` removes the visible card from the feed.
 - An open activity detail refreshes on matching comment/reaction events and
   closes on a matching delete event.
+- `activity.new` still shows the new-post pill for other users, but the SDK can
+  refresh the activity store in the background via `useActivityFeed({
+  autoRefresh: true })`; tapping the pill is then only a UI action to scroll to
+  the top and reset the pending count.
 
 Implementation notes:
 
@@ -85,8 +89,12 @@ Implementation notes:
   `likes_count`.
 - The SDK runtime store listens on `activity:global` after the activity feed has
   loaded and patches the shared `useActivity()` list in place.
+- `useActivityFeed()` filters out the current user's own `activity.new` echo and
+  owns the optional background refresh policy.
 - The Expo `RuntimeActivityDetail` wrapper listens to the same channel and calls
   the existing detail refresh callback for the currently open activity.
+- The Expo app owns only the new-post pill presentation: label, sticky position,
+  tap handling, and scroll-to-top behavior.
 
 Verification:
 
@@ -304,18 +312,23 @@ Recommended updates:
   - `ApiFetchResult` includes optional `total`.
   - `useNotifications()` is realtime-first; REST is reconciliation.
   - `RealtimeProvider` replays active subscriptions into new clients/reconnects.
+  - `UseActivityFeedOptions` is exported so agents can use
+    `useActivityFeed({ autoRefresh: true })`.
 - `blockli-sdk/contracts/live-messaging.v1.json`
   - Feature hooks may subscribe before the socket exists; `RealtimeProvider`
     preserves/replays refs.
   - Troubleshooting: if activity works but bell does not, check `user:{id}`
     subscribe ack and target user ID.
-  - `activity.comment`, `activity.reaction`, and `activity.deleted` are
-    published, but visible in-place UI merging is a separate app wiring step.
+  - `activity.comment`, `activity.reaction`, and `activity.deleted` merge into
+    visible activity feed cards through the SDK runtime store.
+  - `useActivityFeed({ autoRefresh: true })` owns background feed refresh on
+    external `activity.new`; the app owns pill presentation and scroll-to-top.
 - `blockli-mobile-expo-tester/REALTIME-ROADMAP.md`
   - Tighten "DONE" wording where publishers are done but UI merge is only
     partial.
 
-No contract v2 is needed for additive fields such as `ApiFetchResult.total`.
+No contract v2 is needed for additive fields/options such as
+`ApiFetchResult.total` or `UseActivityFeedOptions.autoRefresh`.
 
 ---
 
