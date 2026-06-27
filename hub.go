@@ -78,6 +78,22 @@ func (h *Hub) remove(c *client) {
 	}
 }
 
+// unsubscribe drops a client from a single channel.
+func (h *Hub) unsubscribe(c *client, channel string) {
+	h.mu.Lock()
+	if set := h.byChannel[channel]; set != nil {
+		delete(set, c)
+		if len(set) == 0 {
+			delete(h.byChannel, channel)
+		}
+	}
+	h.mu.Unlock()
+
+	c.mu.Lock()
+	delete(c.subs, channel)
+	c.mu.Unlock()
+}
+
 // deliver fans a payload out to every local client subscribed to channel.
 func (h *Hub) deliver(channel string, payload []byte) {
 	h.mu.RLock()

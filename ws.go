@@ -118,6 +118,14 @@ func (s *server) handleClientMessage(ctx context.Context, c *client, data []byte
 		ack, _ := json.Marshal(map[string][]string{"accepted": accepted, "denied": denied})
 		c.enqueue(mustJSON(event{Type: "subscribed", Data: ack, TS: time.Now().Unix()}))
 		log.Printf("ws: uid=%d subscribe accepted=%v denied=%v", c.uid, accepted, denied)
+	case "unsubscribe":
+		channels := append([]string{}, in.Channels...)
+		for _, t := range in.ThreadIDs {
+			channels = append(channels, fmt.Sprintf("thread:%d", t))
+		}
+		for _, ch := range channels {
+			s.hub.unsubscribe(c, ch)
+		}
 	case "typing":
 		// Only participants of a subscribed thread may emit typing.
 		channel := fmt.Sprintf("thread:%d", in.ThreadID)
