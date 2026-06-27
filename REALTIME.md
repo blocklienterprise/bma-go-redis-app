@@ -240,3 +240,78 @@ Three components must agree on the same secrets and URLs:
 
 RN client lives in the Expo app: `realtime.js` (connection + typing debounce) and
 `Messaging.js` (modal screen), opened from the header "Messages" button.
+
+### Notification realtime fixes (2026-06-27)
+
+The bell/badge path is realtime-first:
+
+1. WordPress creates a BuddyBoss notification.
+2. `BMA_Realtime::on_notification_saved()` publishes `notification.new` to
+   `user:{recipient_id}`.
+3. The app's `NotificationBell` listens via `useNotifications()` and immediately
+   increments `unreadCount` on that event.
+4. A delayed REST refresh reconciles the list/count, but the visual increment must
+   not depend on visiting the Notifications screen.
+
+What was broken:
+
+- The SDK `RealtimeProvider` ref-counted early subscriptions before the socket
+  client existed. `NotificationBell` mounts early and subscribes to `user:{id}`;
+  that channel could be stored in the provider but never replayed into the
+  `RealtimeClient`. Activity still appeared to work because `activity:global`
+  was subscribed later when the activity screen mounted.
+- The SDK notification refresh counted unread items in the first fetched page
+  only. If the user already had 25 unread notifications, a realtime bump could be
+  reconciled back to 25.
+- The WP Realtime Tester originally published a synthetic `notification.new`
+  directly. That proves the Go publish endpoint accepts the event, but it does
+  not create a BuddyBoss notification row, so a REST refresh can remove the
+  apparent count bump.
+- The tester's first real-notification implementation used a custom component
+  that was only registered during admin requests. BuddyBoss REST/UI notification
+  queries filter to registered components, so app REST requests could hide the
+  tester row.
+- The tester defaults the target user to the current WP admin user. If the app is
+  signed in as another user (for example Jessica), the tester must target that
+  user's WordPress ID or the app will not be subscribed to the matching
+  `user:{id}` channel.
+
+What was fixed:
+
+- `blockli-sdk/packages/runtime/src/realtime/RealtimeProvider.tsx`
+  - On client creation, replay every active provider channel ref into the new
+    `RealtimeClient` before `connect()`.
+  - Do not clear active `refCounts` during client teardown; mounted hooks keep
+    their subscriptions across reconnect/client recreation.
+- `blockli-sdk/packages/runtime/src/notifications/index.ts`
+  - Keep the realtime path: `notification.new` still runs
+    `setUnreadCount((n) => n + 1)` immediately.
+  - Reconcile using `GET /notifications?per_page=1&is_new=true` and the
+    `X-WP-Total` header so the true unread total is used without loading all
+    notifications.
+- `blockli-sdk/packages/runtime/src/providerProps.ts` and `types.ts`
+  - Parse existing WordPress/BuddyBoss `X-WP-Total` response headers and expose
+    them as `apiFetch(...).total`.
+- `blockli-mobile-app/includes/class-bma-realtime-tester.php`
+  - The notification test now creates a real unread BuddyBoss notification,
+    which triggers the normal `bp_notification_after_save` → `BMA_Realtime`
+    publish path.
+  - The tester notification component is registered globally so BuddyBoss REST/UI
+    lists include the test notification outside admin requests.
+  - Result details include the target label/channel, e.g. `Jessica (#123)` and
+    `user:123`, to catch wrong-user tests quickly.
+- `blockli-mobile-app/includes/class-bma-plugin.php`
+  - Loads `BMA_Realtime_Tester::hooks()` globally; the admin page remains
+    admin-only, but notification formatting/component registration must be
+    available to REST requests too.
+
+Verification checklist for bell issues:
+
+- Reload the app bundle after SDK changes.
+- Confirm the app is signed in as the same WordPress user ID used in the tester.
+- In Metro logs, after the socket opens, look for a subscribe ack containing
+  `user:{id}`.
+- In WP Admin → Blockli → Realtime Tester, run `Send notification.new` with that
+  same user ID.
+- Expected: bell increments immediately; reloading/opening Notifications still
+  shows the new unread tester notification and preserves the count.

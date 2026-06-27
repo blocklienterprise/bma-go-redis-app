@@ -11,6 +11,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"time"
@@ -23,13 +24,22 @@ func (s *server) handleInternalPublish(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var in struct {
-		ThreadID int             `json:"thread_id"`
+		Channel  string          `json:"channel"`
+		ThreadID int             `json:"thread_id"` // back-compat → thread:{id}
 		Type     string          `json:"type"`
 		UserID   int             `json:"user_id"`
 		Data     json.RawMessage `json:"data"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil || in.ThreadID == 0 {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	channel := in.Channel
+	if channel == "" && in.ThreadID != 0 {
+		channel = fmt.Sprintf("thread:%d", in.ThreadID)
+	}
+	if channel == "" {
+		http.Error(w, "channel or thread_id required", http.StatusBadRequest)
 		return
 	}
 	if in.Type == "" {
@@ -38,12 +48,13 @@ func (s *server) handleInternalPublish(w http.ResponseWriter, r *http.Request) {
 
 	ev := mustJSON(event{
 		Type:     in.Type,
+		Channel:  channel,
 		ThreadID: in.ThreadID,
 		UserID:   in.UserID,
 		Data:     in.Data,
 		TS:       time.Now().Unix(),
 	})
-	if err := s.rt.publish(r.Context(), in.ThreadID, ev); err != nil {
+	if err := s.rt.publish(r.Context(), channel, ev); err != nil {
 		http.Error(w, "publish failed", http.StatusInternalServerError)
 		return
 	}
