@@ -34,14 +34,50 @@ func (c *client) enqueue(b []byte) {
 	}
 }
 
-// Hub indexes clients by channel for O(subscribers) fan-out.
+// Hub indexes clients by channel for O(subscribers) fan-out, and counts live
+// connections per user for presence.
 type Hub struct {
 	mu        sync.RWMutex
 	byChannel map[string]map[*client]struct{}
+	byUser    map[int]int
 }
 
 func newHub() *Hub {
-	return &Hub{byChannel: make(map[string]map[*client]struct{})}
+	return &Hub{
+		byChannel: make(map[string]map[*client]struct{}),
+		byUser:    make(map[int]int),
+	}
+}
+
+// addConn records a new connection for uid and reports whether it's the user's
+// first (0→1 — they just came online).
+func (h *Hub) addConn(uid int) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.byUser[uid]++
+	return h.byUser[uid] == 1
+}
+
+// removeConn drops a connection for uid and reports whether it was the last
+// (1→0 — they just went offline).
+func (h *Hub) removeConn(uid int) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.byUser[uid] > 0 {
+		h.byUser[uid]--
+	}
+	if h.byUser[uid] == 0 {
+		delete(h.byUser, uid)
+		return true
+	}
+	return false
+}
+
+// online reports whether the user currently has at least one live connection.
+func (h *Hub) online(uid int) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.byUser[uid] > 0
 }
 
 func (h *Hub) subscribe(c *client, channel string) {

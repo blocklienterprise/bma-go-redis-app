@@ -128,6 +128,7 @@ func main() {
 	// Realtime messaging endpoints.
 	mux.HandleFunc("GET /ws", srv.handleWS)
 	mux.HandleFunc("POST /internal/publish", srv.handleInternalPublish)
+	mux.HandleFunc("GET /presence", srv.handlePresence)
 
 	log.Printf("Cache proxy listening on :%s", port)
 	log.Fatal(http.ListenAndServe(":"+port, corsMiddleware(mux)))

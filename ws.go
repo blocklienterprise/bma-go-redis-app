@@ -65,6 +65,11 @@ func (s *server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.hub.remove(c)
 
+	// Presence: this connection marks the user online; the last one to close
+	// marks them offline.
+	s.presenceConnect(c.uid)
+	defer s.presenceDisconnect(c.uid)
+
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	go c.writeLoop(ctx, conn)
@@ -137,6 +142,7 @@ func (s *server) handleClientMessage(ctx context.Context, c *client, data []byte
 		ev := mustJSON(event{Type: "typing", Channel: channel, ThreadID: in.ThreadID, UserID: c.uid, Data: payload, TS: time.Now().Unix()})
 		_ = s.rt.publish(ctx, channel, ev)
 	case "ping":
+		s.presenceRefresh(c.uid)
 		c.enqueue(mustJSON(event{Type: "pong", TS: time.Now().Unix()}))
 	}
 }
